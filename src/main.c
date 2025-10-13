@@ -1,6 +1,7 @@
 #include <errno.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -68,6 +69,10 @@ int main() {
         return 1;
     }
 
+    // Prevent zombie processes by ignoring SIGCHLD
+    // This tells the OS to automatically reap child processes
+    signal(SIGCHLD, SIG_IGN);
+
     printf("Waiting for clients to connect...\n");
     client_addr_len = sizeof(client_addr);
 
@@ -80,73 +85,70 @@ int main() {
         }
         printf("Client connected\n");
 
-        // Read the HTTP request
-        char request[1024] = {0};
-        ssize_t bytes_received = recv(fd, request, sizeof(request) - 1, 0);
-        if (bytes_received < 0) {
-            printf("Recv failed: %s\n", strerror(errno));
+        // Fork a child process to handle this connection
+        pid_t pid = fork();
+
+        if (pid < 0) {
+            // Fork failed
+            printf("Fork failed: %s\n", strerror(errno));
             close(fd);
             continue;
         }
-        request[bytes_received] = '\0';
 
-        // Parse the request line to extract the path
-        // Format: "METHOD PATH VERSION\r\n..."
-        char *method = strtok(request, " ");
-        char *path = strtok(NULL, " ");
-        char *version = strtok(NULL, "\r\n");
+        if (pid == 0) {
+            // Child process: handle the request
+            close(server_fd); // Child doesn't need the listening socket
 
-        printf("Request: %s %s %s\n", method ? method : "", path ? path : "", version ? version : "");
+            // Read the HTTP request
+            char request[1024] = {0};
+            ssize_t bytes_received = recv(fd, request, sizeof(request) - 1, 0);
+            if (bytes_received < 0) {
+                printf("Recv failed: %s\n", strerror(errno));
+                close(fd);
+                exit(1);
+            }
+            request[bytes_received] = '\0';
 
-        // Parse headers
-        struct http_header headers[MAX_HEADERS];
-        int header_count = 0;
-        char *header_line;
+            // Parse the request line to extract the path
+            // Format: "METHOD PATH VERSION\r\n..."
+            char *method = strtok(request, " ");
+            char *path = strtok(NULL, " ");
+            char *version = strtok(NULL, "\r\n");
 
-        while ((header_line = strtok(NULL, "\r\n")) != NULL && header_count < MAX_HEADERS) {
-            // Empty line marks end of headers
-            if (header_line[0] == '\0') {
-                break;
+            printf("Request: %s %s %s\n", method ? method : "", path ? path : "", version ? version : "");
+
+            // Parse headers
+            struct http_header headers[MAX_HEADERS];
+            int header_count = 0;
+            char *header_line;
+
+            while ((header_line = strtok(NULL, "\r\n")) != NULL && header_count < MAX_HEADERS) {
+                // Empty line marks end of headers
+                if (header_line[0] == '\0') {
+                    break;
+                }
+
+                // Split header line into name and value at ": "
+                char *colon = strstr(header_line, ": ");
+                if (colon != NULL) {
+                    *colon = '\0'; // Null-terminate the name
+                    headers[header_count].name = header_line;
+                    headers[header_count].value = colon + 2; // Skip ": "
+                    header_count++;
+                }
             }
 
-            // Split header line into name and value at ": "
-            char *colon = strstr(header_line, ": ");
-            if (colon != NULL) {
-                *colon = '\0'; // Null-terminate the name
-                headers[header_count].name = header_line;
-                headers[header_count].value = colon + 2; // Skip ": "
-                header_count++;
-            }
-        }
+            printf("Parsed %d headers\n", header_count);
 
-        printf("Parsed %d headers\n", header_count);
+            // Buffer for building dynamic responses
+            char response_buffer[2048];
+            const char *response;
 
-        // Buffer for building dynamic responses
-        char response_buffer[2048];
-        const char *response;
-
-        // Route based on the path
-        if (path != NULL && strncmp(path, "/echo/", 6) == 0) {
-            // Extract the string after "/echo/"
-            const char *echo_str = path + 6;
-            size_t echo_len = strlen(echo_str);
-
-            // Build response with headers and body
-            snprintf(response_buffer, sizeof(response_buffer),
-                     "HTTP/1.1 200 OK\r\n"
-                     "Content-Type: text/plain\r\n"
-                     "Content-Length: %zu\r\n"
-                     "\r\n"
-                     "%s",
-                     echo_len, echo_str);
-            response = response_buffer;
-            printf("Responding with 200 OK (echo: %s)\n", echo_str);
-        } else if (path != NULL && strcmp(path, "/user-agent") == 0) {
-            // Look up User-Agent header
-            const char *user_agent = get_header_value(headers, header_count, "User-Agent");
-
-            if (user_agent != NULL) {
-                size_t ua_len = strlen(user_agent);
+            // Route based on the path
+            if (path != NULL && strncmp(path, "/echo/", 6) == 0) {
+                // Extract the string after "/echo/"
+                const char *echo_str = path + 6;
+                size_t echo_len = strlen(echo_str);
 
                 // Build response with headers and body
                 snprintf(response_buffer, sizeof(response_buffer),
@@ -155,27 +157,51 @@ int main() {
                          "Content-Length: %zu\r\n"
                          "\r\n"
                          "%s",
-                         ua_len, user_agent);
+                         echo_len, echo_str);
                 response = response_buffer;
-                printf("Responding with 200 OK (user-agent: %s)\n", user_agent);
+                printf("Responding with 200 OK (echo: %s)\n", echo_str);
+            } else if (path != NULL && strcmp(path, "/user-agent") == 0) {
+                // Look up User-Agent header
+                const char *user_agent = get_header_value(headers, header_count, "User-Agent");
+
+                if (user_agent != NULL) {
+                    size_t ua_len = strlen(user_agent);
+
+                    // Build response with headers and body
+                    snprintf(response_buffer, sizeof(response_buffer),
+                             "HTTP/1.1 200 OK\r\n"
+                             "Content-Type: text/plain\r\n"
+                             "Content-Length: %zu\r\n"
+                             "\r\n"
+                             "%s",
+                             ua_len, user_agent);
+                    response = response_buffer;
+                    printf("Responding with 200 OK (user-agent: %s)\n", user_agent);
+                } else {
+                    response = "HTTP/1.1 404 Not Found\r\n\r\n";
+                    printf("Responding with 404 Not Found (no User-Agent header)\n");
+                }
+            } else if (path != NULL && strcmp(path, "/") == 0) {
+                response = "HTTP/1.1 200 OK\r\n\r\n";
+                printf("Responding with 200 OK\n");
             } else {
                 response = "HTTP/1.1 404 Not Found\r\n\r\n";
-                printf("Responding with 404 Not Found (no User-Agent header)\n");
+                printf("Responding with 404 Not Found\n");
             }
-        } else if (path != NULL && strcmp(path, "/") == 0) {
-            response = "HTTP/1.1 200 OK\r\n\r\n";
-            printf("Responding with 200 OK\n");
-        } else {
-            response = "HTTP/1.1 404 Not Found\r\n\r\n";
-            printf("Responding with 404 Not Found\n");
+
+            // Send the response
+            send(fd, response, strlen(response), 0);
+
+            // Close the client connection
+            close(fd);
+            printf("Client disconnected\n");
+
+            // Exit child process
+            exit(0);
         }
 
-        // Send the response
-        send(fd, response, strlen(response), 0);
-
-        // Close the client connection
+        // Parent process: close client fd and continue accepting connections
         close(fd);
-        printf("Client disconnected\n");
     }
 
     close(server_fd);
