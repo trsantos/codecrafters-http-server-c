@@ -50,14 +50,53 @@ int main() {
         return 1;
     }
 
-    printf("Waiting for a client to connect...\n");
+    printf("Waiting for clients to connect...\n");
     client_addr_len = sizeof(client_addr);
 
-    int fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_addr_len);
-    printf("Client connected\n");
+    // Accept multiple connections in a loop
+    while (1) {
+        int fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_addr_len);
+        if (fd == -1) {
+            printf("Accept failed: %s\n", strerror(errno));
+            continue;
+        }
+        printf("Client connected\n");
 
-    char buf[] = "HTTP/1.1 200 OK\r\n\r\n";
-    send(fd, buf, sizeof(buf), 0);
+        // Read the HTTP request
+        char request[1024] = {0};
+        ssize_t bytes_received = recv(fd, request, sizeof(request) - 1, 0);
+        if (bytes_received < 0) {
+            printf("Recv failed: %s\n", strerror(errno));
+            close(fd);
+            continue;
+        }
+        request[bytes_received] = '\0';
+
+        // Parse the request line to extract the path
+        // Format: "METHOD PATH VERSION\r\n..."
+        char *method = strtok(request, " ");
+        char *path = strtok(NULL, " ");
+        char *version = strtok(NULL, "\r\n");
+
+        printf("Request: %s %s %s\n", method ? method : "", path ? path : "", version ? version : "");
+
+        // Route based on the path
+        const char *response;
+        if (path != NULL && strcmp(path, "/") == 0) {
+            response = "HTTP/1.1 200 OK\r\n\r\n";
+            printf("Responding with 200 OK\n");
+        } else {
+            response = "HTTP/1.1 404 Not Found\r\n\r\n";
+            printf("Responding with 404 Not Found\n");
+        }
+
+        // Send the response
+        send(fd, response, strlen(response), 0);
+
+        // Close the client connection
+        close(fd);
+        printf("Client disconnected\n");
+    }
 
     close(server_fd);
 

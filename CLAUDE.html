@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"
+	"http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+
+<html xmlns="http://www.w3.org/1999/xhtml">
+
+<head>
+<title>CLAUDE.html</title>
+<meta http-equiv="Content-Type" content="text/html;charset=utf-8"/>
+
+</head>
+
+<body>
+
+<h1 id="claude.md">CLAUDE.md</h1>
+
+<p>This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.</p>
+
+<h2 id="projectoverview">Project Overview</h2>
+
+<p>This is a CodeCrafters HTTP/1.1 server implementation in C (C23 standard). The project is part of the "Build Your Own HTTP server" challenge, where you build a TCP server capable of serving multiple clients using raw socket programming.</p>
+
+<h2 id="buildsystem">Build System</h2>
+
+<ul>
+<li><strong>Build tool</strong>: CMake (minimum version 3.13)</li>
+<li><strong>Package manager</strong>: vcpkg (configured via <code>vcpkg.json</code> and <code>vcpkg-configuration.json</code>)</li>
+<li><strong>C Standard</strong>: C23 (configured in <code>CMakeLists.txt</code>)</li>
+<li><strong>Binary name</strong>: <code>http-server</code></li>
+</ul>
+
+<h3 id="buildcommands">Build Commands</h3>
+
+<p>```sh</p>
+
+<h1 id="buildtheprojectbuildsto.buildhttp-server">Build the project (builds to ./build/http-server)</h1>
+
+<p>cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake
+cmake --build ./build</p>
+
+<h1 id="runtheserverlocally">Run the server locally</h1>
+
+<p>./your_program.sh</p>
+
+<h1 id="theyour_program.shscriptdoesboth:compilesandrunstheserver">The your_program.sh script does both: compiles and runs the server</h1>
+
+<p>```</p>
+
+<h2 id="developmentworkflow">Development Workflow</h2>
+
+<h3 id="testingoncodecrafters">Testing on CodeCrafters</h3>
+
+<p>CodeCrafters automatically tests your code when you push to the master branch:</p>
+
+<p><code>sh
+git commit -am "your commit message"
+git push origin master
+</code></p>
+
+<p>The test output will be streamed to your terminal. The <code>.codecrafters/</code> directory contains the compile and run scripts used by the CodeCrafters platform (don't modify these directly).</p>
+
+<h3 id="localdevelopment">Local Development</h3>
+
+<ol>
+<li>Edit code in <code>src/main.c</code> (currently the only source file)</li>
+<li>Run <code>./your_program.sh</code> to compile and start the server</li>
+<li>The server listens on port 4221 by default</li>
+<li>Test with curl or a browser: <code>curl http://localhost:4221/</code></li>
+</ol>
+
+<h2 id="codearchitecture">Code Architecture</h2>
+
+<h3 id="currentimplementationsrcmain.c">Current Implementation (src/main.c)</h3>
+
+<p>The current implementation is a basic TCP server skeleton:</p>
+
+<ul>
+<li><strong>Socket creation</strong>: Creates a TCP socket with <code>AF_INET</code> and <code>SOCK_STREAM</code></li>
+<li><strong>Socket options</strong>: Uses <code>SO_REUSEADDR</code> to avoid "Address already in use" errors during rapid restarts</li>
+<li><strong>Binding</strong>: Binds to port 4221 on all interfaces (<code>INADDR_ANY</code>)</li>
+<li><strong>Listening</strong>: Accepts incoming connections with a backlog of 5</li>
+<li><strong>Response</strong>: Currently sends a hardcoded HTTP 200 OK response to the first client</li>
+<li><strong>Limitation</strong>: Only handles one client connection then exits - needs to be extended for multiple clients</li>
+</ul>
+
+<h3 id="keytechnicaldetails">Key Technical Details</h3>
+
+<ul>
+<li>The server uses standard POSIX socket APIs (<code>socket</code>, <code>bind</code>, <code>listen</code>, <code>accept</code>, <code>send</code>)</li>
+<li>Output buffering is disabled for stdout/stderr to ensure debug messages appear immediately</li>
+<li>Error handling uses <code>strerror(errno)</code> to provide descriptive error messages</li>
+<li>The server structure uses designated initializers for <code>sockaddr_in</code> (C99+ feature)</li>
+</ul>
+
+<h3 id="expectedevolution">Expected Evolution</h3>
+
+<p>As you progress through CodeCrafters stages, you'll likely need to:
+- Add HTTP request parsing (parse method, path, headers, body)
+- Implement routing logic for different endpoints
+- Handle multiple concurrent connections (likely using fork/threads or select/poll/epoll)
+- Support HTTP request methods (GET, POST, etc.)
+- Implement proper HTTP response formatting with headers
+- Add file serving capabilities
+- Handle connection lifecycle properly (keep-alive vs close)</p>
+
+<h2 id="projectconfiguration">Project Configuration</h2>
+
+<ul>
+<li><strong>codecrafters.yml</strong>: Controls CodeCrafters-specific settings (debug mode, language pack)</li>
+<li><strong>vcpkg.json</strong>: Package dependencies (currently empty, add dependencies here as needed)</li>
+<li><strong>CMakeLists.txt</strong>: Automatically includes all <code>.c</code> and <code>.h</code> files from <code>src/</code> directory</li>
+</ul>
+
+</body>
+</html>
