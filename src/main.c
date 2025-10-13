@@ -80,9 +80,27 @@ int main() {
 
         printf("Request: %s %s %s\n", method ? method : "", path ? path : "", version ? version : "");
 
-        // Route based on the path
+        // Buffer for building dynamic responses
+        char response_buffer[2048];
         const char *response;
-        if (path != NULL && strcmp(path, "/") == 0) {
+
+        // Route based on the path
+        if (path != NULL && strncmp(path, "/echo/", 6) == 0) {
+            // Extract the string after "/echo/"
+            const char *echo_str = path + 6;
+            size_t echo_len = strlen(echo_str);
+
+            // Build response with headers and body
+            snprintf(response_buffer, sizeof(response_buffer),
+                    "HTTP/1.1 200 OK\r\n"
+                    "Content-Type: text/plain\r\n"
+                    "Content-Length: %zu\r\n"
+                    "\r\n"
+                    "%s",
+                    echo_len, echo_str);
+            response = response_buffer;
+            printf("Responding with 200 OK (echo: %s)\n", echo_str);
+        } else if (path != NULL && strcmp(path, "/") == 0) {
             response = "HTTP/1.1 200 OK\r\n\r\n";
             printf("Responding with 200 OK\n");
         } else {
