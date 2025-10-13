@@ -4,8 +4,26 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
+#define MAX_HEADERS 32
+
+struct http_header {
+    char *name;
+    char *value;
+};
+
+// Helper function to find a header value by name (case-insensitive)
+const char *get_header_value(struct http_header *headers, int count, const char *name) {
+    for (int i = 0; i < count; i++) {
+        if (strcasecmp(headers[i].name, name) == 0) {
+            return headers[i].value;
+        }
+    }
+    return NULL;
+}
 
 int main() {
     // Disable output buffering
@@ -80,6 +98,29 @@ int main() {
 
         printf("Request: %s %s %s\n", method ? method : "", path ? path : "", version ? version : "");
 
+        // Parse headers
+        struct http_header headers[MAX_HEADERS];
+        int header_count = 0;
+        char *header_line;
+
+        while ((header_line = strtok(NULL, "\r\n")) != NULL && header_count < MAX_HEADERS) {
+            // Empty line marks end of headers
+            if (header_line[0] == '\0') {
+                break;
+            }
+
+            // Split header line into name and value at ": "
+            char *colon = strstr(header_line, ": ");
+            if (colon != NULL) {
+                *colon = '\0'; // Null-terminate the name
+                headers[header_count].name = header_line;
+                headers[header_count].value = colon + 2; // Skip ": "
+                header_count++;
+            }
+        }
+
+        printf("Parsed %d headers\n", header_count);
+
         // Buffer for building dynamic responses
         char response_buffer[2048];
         const char *response;
@@ -92,14 +133,35 @@ int main() {
 
             // Build response with headers and body
             snprintf(response_buffer, sizeof(response_buffer),
-                    "HTTP/1.1 200 OK\r\n"
-                    "Content-Type: text/plain\r\n"
-                    "Content-Length: %zu\r\n"
-                    "\r\n"
-                    "%s",
-                    echo_len, echo_str);
+                     "HTTP/1.1 200 OK\r\n"
+                     "Content-Type: text/plain\r\n"
+                     "Content-Length: %zu\r\n"
+                     "\r\n"
+                     "%s",
+                     echo_len, echo_str);
             response = response_buffer;
             printf("Responding with 200 OK (echo: %s)\n", echo_str);
+        } else if (path != NULL && strcmp(path, "/user-agent") == 0) {
+            // Look up User-Agent header
+            const char *user_agent = get_header_value(headers, header_count, "User-Agent");
+
+            if (user_agent != NULL) {
+                size_t ua_len = strlen(user_agent);
+
+                // Build response with headers and body
+                snprintf(response_buffer, sizeof(response_buffer),
+                         "HTTP/1.1 200 OK\r\n"
+                         "Content-Type: text/plain\r\n"
+                         "Content-Length: %zu\r\n"
+                         "\r\n"
+                         "%s",
+                         ua_len, user_agent);
+                response = response_buffer;
+                printf("Responding with 200 OK (user-agent: %s)\n", user_agent);
+            } else {
+                response = "HTTP/1.1 404 Not Found\r\n\r\n";
+                printf("Responding with 404 Not Found (no User-Agent header)\n");
+            }
         } else if (path != NULL && strcmp(path, "/") == 0) {
             response = "HTTP/1.1 200 OK\r\n\r\n";
             printf("Responding with 200 OK\n");
