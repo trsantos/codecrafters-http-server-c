@@ -78,8 +78,8 @@ const char *handle_not_found() {
     return "HTTP/1.1 404 Not Found\r\n\r\n";
 }
 
-// Handler for /files/{filename} - returns NULL if handled directly
-const char *handle_files(const char *filename, int client_fd) {
+// Handler for GET /files/{filename} - returns NULL if handled directly
+const char *handle_files_get(const char *filename, int client_fd) {
     // Check if directory is configured
     if (g_files_directory == NULL) {
         printf("No files directory configured\n");
@@ -125,6 +125,43 @@ const char *handle_files(const char *filename, int client_fd) {
     return NULL;  // Signal that we handled sending directly
 }
 
+// Handler for POST /files/{filename} - returns NULL if handled directly
+const char *handle_files_post(const char *filename, const char *body, size_t body_len, int client_fd) {
+    // Check if directory is configured
+    if (g_files_directory == NULL) {
+        printf("No files directory configured\n");
+        return handle_not_found();
+    }
+
+    // Build full file path
+    char filepath[1024];
+    snprintf(filepath, sizeof(filepath), "%s/%s", g_files_directory, filename);
+
+    // Open file for writing (create if doesn't exist, truncate if exists)
+    FILE *file = fopen(filepath, "wb");
+    if (file == NULL) {
+        printf("Failed to create file: %s (%s)\n", filepath, strerror(errno));
+        return handle_not_found();
+    }
+
+    // Write body to file
+    size_t bytes_written = fwrite(body, 1, body_len, file);
+    fclose(file);
+
+    if (bytes_written != body_len) {
+        printf("Failed to write complete body to file (wrote %zu of %zu bytes)\n", bytes_written, body_len);
+        return "HTTP/1.1 500 Internal Server Error\r\n\r\n";
+    }
+
+    printf("Created file: %s (%zu bytes)\n", filename, body_len);
+
+    // Send 201 Created response
+    const char *response = "HTTP/1.1 201 Created\r\n\r\n";
+    send(client_fd, response, strlen(response), 0);
+
+    return NULL;  // Signal that we handled sending directly
+}
+
 // Parse command-line arguments
 void parse_arguments(int argc, char *argv[]) {
     for (int i = 1; i < argc; i++) {
@@ -147,6 +184,13 @@ void handle_client(int client_fd) {
         return;
     }
     request[bytes_received] = '\0';
+
+    // Find where body starts BEFORE strtok modifies the buffer
+    char *body_start_marker = strstr(request, "\r\n\r\n");
+    char *body = NULL;
+    if (body_start_marker != NULL) {
+        body = body_start_marker + 4;  // Move past \r\n\r\n
+    }
 
     // Parse the request line to extract the path
     // Format: "METHOD PATH VERSION\r\n..."
@@ -179,13 +223,51 @@ void handle_client(int client_fd) {
 
     printf("Parsed %d headers\n", header_count);
 
+    // Calculate body length from Content-Length header
+    size_t body_len = 0;
+    if (body != NULL) {
+        const char *content_length_str = get_header_value(headers, header_count, "Content-Length");
+        if (content_length_str != NULL) {
+            long content_length = atol(content_length_str);
+            if (content_length > 0) {
+                // Calculate how much body we already have
+                size_t body_bytes_in_buffer = bytes_received - (body - request);
+
+                if (body_bytes_in_buffer >= (size_t)content_length) {
+                    // All body data is already in the buffer
+                    body_len = content_length;
+                } else {
+                    // Need to read more data
+                    size_t remaining = content_length - body_bytes_in_buffer;
+                    printf("Need to read %zu more bytes of body\n", remaining);
+                    ssize_t additional = recv(client_fd, body + body_bytes_in_buffer, remaining, 0);
+                    if (additional > 0) {
+                        body_len = content_length;
+                    }
+                }
+
+                if (body_len > 0) {
+                    printf("Read request body: %zu bytes\n", body_len);
+                }
+            }
+        }
+    }
+
     // Buffer for building dynamic responses
     char response_buffer[2048];
     const char *response;
 
     // Route based on the path
     if (path != NULL && strncmp(path, "/files/", 7) == 0) {
-        response = handle_files(path + 7, client_fd);
+        // Route based on HTTP method
+        if (method != NULL && strcmp(method, "POST") == 0) {
+            response = handle_files_post(path + 7, body, body_len, client_fd);
+        } else if (method != NULL && strcmp(method, "GET") == 0) {
+            response = handle_files_get(path + 7, client_fd);
+        } else {
+            response = handle_not_found();
+        }
+
         if (response == NULL) {
             // File handler sent response directly
             close(client_fd);
