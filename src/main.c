@@ -8,6 +8,7 @@
 #include <strings.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <zlib.h>
 
 #define MAX_HEADERS 32
 
@@ -67,65 +68,116 @@ int client_accepts_gzip(struct http_header *headers, int header_count) {
     return 0;
 }
 
+// Helper function to send HTTP text response with optional gzip compression
+// Returns NULL to signal we handled sending directly
+const char *send_text_response(int client_fd, const char *content_type, const char *body, size_t body_len,
+                               struct http_header *headers, int header_count) {
+    char header_buffer[512];
+
+    if (client_accepts_gzip(headers, header_count)) {
+        // Safety check: reject unreasonably large bodies
+        if (body_len > 10 * 1024 * 1024) { // 10MB limit
+            printf("Body too large for compression: %zu bytes\n", body_len);
+            const char *error = "HTTP/1.1 500 Internal Server Error\r\n\r\n";
+            send(client_fd, error, strlen(error), 0);
+            return NULL;
+        }
+
+        // Initialize zlib stream for gzip compression
+        z_stream stream = {0};
+
+        // Initialize with gzip format (windowBits = 15 + 16 for gzip wrapper)
+        if (deflateInit2(&stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+            printf("deflateInit2 failed\n");
+            const char *error = "HTTP/1.1 500 Internal Server Error\r\n\r\n";
+            send(client_fd, error, strlen(error), 0);
+            return NULL;
+        }
+
+        // Get the correct buffer size using deflateBound (accounts for gzip format)
+        uLong compressed_max = deflateBound(&stream, body_len);
+        unsigned char *compressed_body = malloc(compressed_max);
+        if (compressed_body == NULL) {
+            printf("Failed to allocate memory for compression\n");
+            deflateEnd(&stream);
+            const char *error = "HTTP/1.1 500 Internal Server Error\r\n\r\n";
+            send(client_fd, error, strlen(error), 0);
+            return NULL;
+        }
+
+        // Set up stream pointers
+        stream.next_in = (Bytef *)body;
+        stream.avail_in = body_len;
+        stream.next_out = compressed_body;
+        stream.avail_out = compressed_max;
+
+        // Compress in one shot with Z_FINISH
+        int ret = deflate(&stream, Z_FINISH);
+
+        // Only read total_out after verifying compression succeeded
+        uLongf compressed_len = 0;
+        if (ret == Z_STREAM_END) {
+            compressed_len = stream.total_out;
+        }
+
+        // Always clean up the stream
+        deflateEnd(&stream);
+
+        if (ret != Z_STREAM_END) {
+            printf("deflate failed with code %d\n", ret);
+            free(compressed_body);
+            const char *error = "HTTP/1.1 500 Internal Server Error\r\n\r\n";
+            send(client_fd, error, strlen(error), 0);
+            return NULL;
+        }
+
+        // Build and send headers
+        snprintf(header_buffer, sizeof(header_buffer),
+                 "HTTP/1.1 200 OK\r\n"
+                 "Content-Type: %s\r\n"
+                 "Content-Encoding: gzip\r\n"
+                 "Content-Length: %lu\r\n"
+                 "\r\n",
+                 content_type, compressed_len);
+        send(client_fd, header_buffer, strlen(header_buffer), 0);
+
+        // Send compressed body
+        send(client_fd, compressed_body, compressed_len, 0);
+
+        free(compressed_body);
+        printf("Sent compressed response: %zu bytes -> %lu bytes\n", body_len, compressed_len);
+    } else {
+        // No compression - send plain text
+        snprintf(header_buffer, sizeof(header_buffer),
+                 "HTTP/1.1 200 OK\r\n"
+                 "Content-Type: %s\r\n"
+                 "Content-Length: %zu\r\n"
+                 "\r\n",
+                 content_type, body_len);
+        send(client_fd, header_buffer, strlen(header_buffer), 0);
+        send(client_fd, body, body_len, 0);
+
+        printf("Sent uncompressed response: %zu bytes\n", body_len);
+    }
+
+    return NULL; // Signal that we handled sending directly
+}
+
 // Route handlers
 
 // Handler for /echo/{str}
-const char *handle_echo(const char *echo_str, struct http_header *headers, int header_count, char *buffer, size_t buffer_size) {
-    size_t echo_len = strlen(echo_str);
-
-    if (client_accepts_gzip(headers, header_count)) {
-        snprintf(buffer, buffer_size,
-                 "HTTP/1.1 200 OK\r\n"
-                 "Content-Type: text/plain\r\n"
-                 "Content-Encoding: gzip\r\n"
-                 "Content-Length: %zu\r\n"
-                 "\r\n"
-                 "%s",
-                 echo_len, echo_str);
-        printf("Responding with 200 OK (echo: %s, gzip encoding)\n", echo_str);
-    } else {
-        snprintf(buffer, buffer_size,
-                 "HTTP/1.1 200 OK\r\n"
-                 "Content-Type: text/plain\r\n"
-                 "Content-Length: %zu\r\n"
-                 "\r\n"
-                 "%s",
-                 echo_len, echo_str);
-        printf("Responding with 200 OK (echo: %s)\n", echo_str);
-    }
-
-    return buffer;
+const char *handle_echo(const char *echo_str, struct http_header *headers, int header_count, int client_fd) {
+    printf("Responding with 200 OK (echo: %s)\n", echo_str);
+    return send_text_response(client_fd, "text/plain", echo_str, strlen(echo_str), headers, header_count);
 }
 
 // Handler for /user-agent
-const char *handle_user_agent(struct http_header *headers, int count, char *buffer, size_t buffer_size) {
+const char *handle_user_agent(struct http_header *headers, int count, int client_fd) {
     const char *user_agent = get_header_value(headers, count, "User-Agent");
 
     if (user_agent != NULL) {
-        size_t ua_len = strlen(user_agent);
-
-        if (client_accepts_gzip(headers, count)) {
-            snprintf(buffer, buffer_size,
-                     "HTTP/1.1 200 OK\r\n"
-                     "Content-Type: text/plain\r\n"
-                     "Content-Encoding: gzip\r\n"
-                     "Content-Length: %zu\r\n"
-                     "\r\n"
-                     "%s",
-                     ua_len, user_agent);
-            printf("Responding with 200 OK (user-agent: %s, gzip encoding)\n", user_agent);
-        } else {
-            snprintf(buffer, buffer_size,
-                     "HTTP/1.1 200 OK\r\n"
-                     "Content-Type: text/plain\r\n"
-                     "Content-Length: %zu\r\n"
-                     "\r\n"
-                     "%s",
-                     ua_len, user_agent);
-            printf("Responding with 200 OK (user-agent: %s)\n", user_agent);
-        }
-
-        return buffer;
+        printf("Responding with 200 OK (user-agent: %s)\n", user_agent);
+        return send_text_response(client_fd, "text/plain", user_agent, strlen(user_agent), headers, count);
     } else {
         printf("Responding with 404 Not Found (no User-Agent header)\n");
         return "HTTP/1.1 404 Not Found\r\n\r\n";
@@ -188,7 +240,7 @@ const char *handle_files_get(const char *filename, int client_fd) {
     fclose(file);
     printf("Sent file: %s (%ld bytes)\n", filename, file_size);
 
-    return NULL;  // Signal that we handled sending directly
+    return NULL; // Signal that we handled sending directly
 }
 
 // Handler for POST /files/{filename} - returns NULL if handled directly
@@ -225,7 +277,7 @@ const char *handle_files_post(const char *filename, const char *body, size_t bod
     const char *response = "HTTP/1.1 201 Created\r\n\r\n";
     send(client_fd, response, strlen(response), 0);
 
-    return NULL;  // Signal that we handled sending directly
+    return NULL; // Signal that we handled sending directly
 }
 
 // Parse command-line arguments
@@ -234,7 +286,7 @@ void parse_arguments(int argc, char *argv[]) {
         if (strcmp(argv[i], "--directory") == 0 && i + 1 < argc) {
             g_files_directory = argv[i + 1];
             printf("Files directory: %s\n", g_files_directory);
-            i++;  // Skip the next argument since we consumed it
+            i++; // Skip the next argument since we consumed it
         }
     }
 }
@@ -255,7 +307,7 @@ void handle_client(int client_fd) {
     char *body_start_marker = strstr(request, "\r\n\r\n");
     char *body = NULL;
     if (body_start_marker != NULL) {
-        body = body_start_marker + 4;  // Move past \r\n\r\n
+        body = body_start_marker + 4; // Move past \r\n\r\n
     }
 
     // Parse the request line to extract the path
@@ -280,9 +332,9 @@ void handle_client(int client_fd) {
         // Split header line into name and value at ": "
         char *colon = strstr(header_line, ": ");
         if (colon != NULL) {
-            *colon = '\0';  // Null-terminate the name
+            *colon = '\0'; // Null-terminate the name
             headers[header_count].name = header_line;
-            headers[header_count].value = colon + 2;  // Skip ": "
+            headers[header_count].value = colon + 2; // Skip ": "
             header_count++;
         }
     }
@@ -319,8 +371,6 @@ void handle_client(int client_fd) {
         }
     }
 
-    // Buffer for building dynamic responses
-    char response_buffer[2048];
     const char *response;
 
     // Route based on the path
@@ -341,17 +391,19 @@ void handle_client(int client_fd) {
             return;
         }
     } else if (path != NULL && strncmp(path, "/echo/", 6) == 0) {
-        response = handle_echo(path + 6, headers, header_count, response_buffer, sizeof(response_buffer));
+        response = handle_echo(path + 6, headers, header_count, client_fd);
     } else if (path != NULL && strcmp(path, "/user-agent") == 0) {
-        response = handle_user_agent(headers, header_count, response_buffer, sizeof(response_buffer));
+        response = handle_user_agent(headers, header_count, client_fd);
     } else if (path != NULL && strcmp(path, "/") == 0) {
         response = handle_root();
     } else {
         response = handle_not_found();
     }
 
-    // Send the response
-    send(client_fd, response, strlen(response), 0);
+    // Send the response (if handler didn't send it directly)
+    if (response != NULL) {
+        send(client_fd, response, strlen(response), 0);
+    }
 
     // Close the client connection
     close(client_fd);
@@ -432,7 +484,7 @@ int main(int argc, char *argv[]) {
 
         if (pid == 0) {
             // Child process: handle the request
-            close(server_fd);  // Child doesn't need the listening socket
+            close(server_fd); // Child doesn't need the listening socket
             handle_client(fd);
             exit(0);
         }
