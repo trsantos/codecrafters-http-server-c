@@ -29,19 +29,42 @@ const char *get_header_value(struct http_header *headers, int count, const char 
     return NULL;
 }
 
+// Helper function to check if client accepts gzip compression
+int client_accepts_gzip(struct http_header *headers, int header_count) {
+    const char *accept_encoding = get_header_value(headers, header_count, "Accept-Encoding");
+    if (accept_encoding != NULL && strstr(accept_encoding, "gzip") != NULL) {
+        return 1;
+    }
+    return 0;
+}
+
 // Route handlers
 
 // Handler for /echo/{str}
-const char *handle_echo(const char *echo_str, char *buffer, size_t buffer_size) {
+const char *handle_echo(const char *echo_str, struct http_header *headers, int header_count, char *buffer, size_t buffer_size) {
     size_t echo_len = strlen(echo_str);
-    snprintf(buffer, buffer_size,
-             "HTTP/1.1 200 OK\r\n"
-             "Content-Type: text/plain\r\n"
-             "Content-Length: %zu\r\n"
-             "\r\n"
-             "%s",
-             echo_len, echo_str);
-    printf("Responding with 200 OK (echo: %s)\n", echo_str);
+
+    if (client_accepts_gzip(headers, header_count)) {
+        snprintf(buffer, buffer_size,
+                 "HTTP/1.1 200 OK\r\n"
+                 "Content-Type: text/plain\r\n"
+                 "Content-Encoding: gzip\r\n"
+                 "Content-Length: %zu\r\n"
+                 "\r\n"
+                 "%s",
+                 echo_len, echo_str);
+        printf("Responding with 200 OK (echo: %s, gzip encoding)\n", echo_str);
+    } else {
+        snprintf(buffer, buffer_size,
+                 "HTTP/1.1 200 OK\r\n"
+                 "Content-Type: text/plain\r\n"
+                 "Content-Length: %zu\r\n"
+                 "\r\n"
+                 "%s",
+                 echo_len, echo_str);
+        printf("Responding with 200 OK (echo: %s)\n", echo_str);
+    }
+
     return buffer;
 }
 
@@ -51,14 +74,28 @@ const char *handle_user_agent(struct http_header *headers, int count, char *buff
 
     if (user_agent != NULL) {
         size_t ua_len = strlen(user_agent);
-        snprintf(buffer, buffer_size,
-                 "HTTP/1.1 200 OK\r\n"
-                 "Content-Type: text/plain\r\n"
-                 "Content-Length: %zu\r\n"
-                 "\r\n"
-                 "%s",
-                 ua_len, user_agent);
-        printf("Responding with 200 OK (user-agent: %s)\n", user_agent);
+
+        if (client_accepts_gzip(headers, count)) {
+            snprintf(buffer, buffer_size,
+                     "HTTP/1.1 200 OK\r\n"
+                     "Content-Type: text/plain\r\n"
+                     "Content-Encoding: gzip\r\n"
+                     "Content-Length: %zu\r\n"
+                     "\r\n"
+                     "%s",
+                     ua_len, user_agent);
+            printf("Responding with 200 OK (user-agent: %s, gzip encoding)\n", user_agent);
+        } else {
+            snprintf(buffer, buffer_size,
+                     "HTTP/1.1 200 OK\r\n"
+                     "Content-Type: text/plain\r\n"
+                     "Content-Length: %zu\r\n"
+                     "\r\n"
+                     "%s",
+                     ua_len, user_agent);
+            printf("Responding with 200 OK (user-agent: %s)\n", user_agent);
+        }
+
         return buffer;
     } else {
         printf("Responding with 404 Not Found (no User-Agent header)\n");
@@ -275,7 +312,7 @@ void handle_client(int client_fd) {
             return;
         }
     } else if (path != NULL && strncmp(path, "/echo/", 6) == 0) {
-        response = handle_echo(path + 6, response_buffer, sizeof(response_buffer));
+        response = handle_echo(path + 6, headers, header_count, response_buffer, sizeof(response_buffer));
     } else if (path != NULL && strcmp(path, "/user-agent") == 0) {
         response = handle_user_agent(headers, header_count, response_buffer, sizeof(response_buffer));
     } else if (path != NULL && strcmp(path, "/") == 0) {
