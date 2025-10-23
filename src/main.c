@@ -293,116 +293,128 @@ void parse_arguments(int argc, char *argv[]) {
 
 // Handle a client connection
 void handle_client(int client_fd) {
-    // Read the HTTP request
-    char request[1024] = {0};
-    ssize_t bytes_received = recv(client_fd, request, sizeof(request) - 1, 0);
-    if (bytes_received < 0) {
-        printf("Recv failed: %s\n", strerror(errno));
-        close(client_fd);
-        return;
-    }
-    request[bytes_received] = '\0';
+    // Keep connection open for multiple requests (HTTP/1.1 persistent connections)
+    while (1) {
+        // Read the HTTP request
+        char request[1024] = {0};
+        ssize_t bytes_received = recv(client_fd, request, sizeof(request) - 1, 0);
 
-    // Find where body starts BEFORE strtok modifies the buffer
-    char *body_start_marker = strstr(request, "\r\n\r\n");
-    char *body = NULL;
-    if (body_start_marker != NULL) {
-        body = body_start_marker + 4; // Move past \r\n\r\n
-    }
-
-    // Parse the request line to extract the path
-    // Format: "METHOD PATH VERSION\r\n..."
-    char *method = strtok(request, " ");
-    char *path = strtok(NULL, " ");
-    char *version = strtok(NULL, "\r\n");
-
-    printf("Request: %s %s %s\n", method ? method : "", path ? path : "", version ? version : "");
-
-    // Parse headers
-    struct http_header headers[MAX_HEADERS];
-    int header_count = 0;
-    char *header_line;
-
-    while ((header_line = strtok(NULL, "\r\n")) != NULL && header_count < MAX_HEADERS) {
-        // Empty line marks end of headers
-        if (header_line[0] == '\0') {
+        // Check for connection closure or error
+        if (bytes_received <= 0) {
+            if (bytes_received == 0) {
+                printf("Client closed connection\n");
+            } else {
+                printf("Recv failed: %s\n", strerror(errno));
+            }
             break;
         }
+        request[bytes_received] = '\0';
 
-        // Split header line into name and value at ": "
-        char *colon = strstr(header_line, ": ");
-        if (colon != NULL) {
-            *colon = '\0'; // Null-terminate the name
-            headers[header_count].name = header_line;
-            headers[header_count].value = colon + 2; // Skip ": "
-            header_count++;
+        // Find where body starts BEFORE strtok modifies the buffer
+        char *body_start_marker = strstr(request, "\r\n\r\n");
+        char *body = NULL;
+        if (body_start_marker != NULL) {
+            body = body_start_marker + 4; // Move past \r\n\r\n
         }
-    }
 
-    printf("Parsed %d headers\n", header_count);
+        // Parse the request line to extract the path
+        // Format: "METHOD PATH VERSION\r\n..."
+        char *method = strtok(request, " ");
+        char *path = strtok(NULL, " ");
+        char *version = strtok(NULL, "\r\n");
 
-    // Calculate body length from Content-Length header
-    size_t body_len = 0;
-    if (body != NULL) {
-        const char *content_length_str = get_header_value(headers, header_count, "Content-Length");
-        if (content_length_str != NULL) {
-            long content_length = atol(content_length_str);
-            if (content_length > 0) {
-                // Calculate how much body we already have
-                size_t body_bytes_in_buffer = bytes_received - (body - request);
+        printf("Request: %s %s %s\n", method ? method : "", path ? path : "", version ? version : "");
 
-                if (body_bytes_in_buffer >= (size_t)content_length) {
-                    // All body data is already in the buffer
-                    body_len = content_length;
-                } else {
-                    // Need to read more data
-                    size_t remaining = content_length - body_bytes_in_buffer;
-                    printf("Need to read %zu more bytes of body\n", remaining);
-                    ssize_t additional = recv(client_fd, body + body_bytes_in_buffer, remaining, 0);
-                    if (additional > 0) {
+        // Parse headers
+        struct http_header headers[MAX_HEADERS];
+        int header_count = 0;
+        char *header_line;
+
+        while ((header_line = strtok(NULL, "\r\n")) != NULL && header_count < MAX_HEADERS) {
+            // Empty line marks end of headers
+            if (header_line[0] == '\0') {
+                break;
+            }
+
+            // Split header line into name and value at ": "
+            char *colon = strstr(header_line, ": ");
+            if (colon != NULL) {
+                *colon = '\0'; // Null-terminate the name
+                headers[header_count].name = header_line;
+                headers[header_count].value = colon + 2; // Skip ": "
+                header_count++;
+            }
+        }
+
+        printf("Parsed %d headers\n", header_count);
+
+        // Calculate body length from Content-Length header
+        size_t body_len = 0;
+        if (body != NULL) {
+            const char *content_length_str = get_header_value(headers, header_count, "Content-Length");
+            if (content_length_str != NULL) {
+                long content_length = atol(content_length_str);
+                if (content_length > 0) {
+                    // Calculate how much body we already have
+                    size_t body_bytes_in_buffer = bytes_received - (body - request);
+
+                    if (body_bytes_in_buffer >= (size_t)content_length) {
+                        // All body data is already in the buffer
                         body_len = content_length;
+                    } else {
+                        // Need to read more data
+                        size_t remaining = content_length - body_bytes_in_buffer;
+                        printf("Need to read %zu more bytes of body\n", remaining);
+                        ssize_t additional = recv(client_fd, body + body_bytes_in_buffer, remaining, 0);
+                        if (additional > 0) {
+                            body_len = content_length;
+                        }
                     }
-                }
 
-                if (body_len > 0) {
-                    printf("Read request body: %zu bytes\n", body_len);
+                    if (body_len > 0) {
+                        printf("Read request body: %zu bytes\n", body_len);
+                    }
                 }
             }
         }
-    }
 
-    const char *response;
+        const char *response;
 
-    // Route based on the path
-    if (path != NULL && strncmp(path, "/files/", 7) == 0) {
-        // Route based on HTTP method
-        if (method != NULL && strcmp(method, "POST") == 0) {
-            response = handle_files_post(path + 7, body, body_len, client_fd);
-        } else if (method != NULL && strcmp(method, "GET") == 0) {
-            response = handle_files_get(path + 7, client_fd);
+        // Route based on the path
+        if (path != NULL && strncmp(path, "/files/", 7) == 0) {
+            // Route based on HTTP method
+            if (method != NULL && strcmp(method, "POST") == 0) {
+                response = handle_files_post(path + 7, body, body_len, client_fd);
+            } else if (method != NULL && strcmp(method, "GET") == 0) {
+                response = handle_files_get(path + 7, client_fd);
+            } else {
+                response = handle_not_found();
+            }
+        } else if (path != NULL && strncmp(path, "/echo/", 6) == 0) {
+            response = handle_echo(path + 6, headers, header_count, client_fd);
+        } else if (path != NULL && strcmp(path, "/user-agent") == 0) {
+            response = handle_user_agent(headers, header_count, client_fd);
+        } else if (path != NULL && strcmp(path, "/") == 0) {
+            response = handle_root();
         } else {
             response = handle_not_found();
         }
 
-        if (response == NULL) {
-            // File handler sent response directly
-            close(client_fd);
-            printf("Client disconnected\n");
-            return;
+        // Send the response (if handler didn't send it directly)
+        // NULL means handler already sent the response
+        if (response != NULL) {
+            send(client_fd, response, strlen(response), 0);
         }
-    } else if (path != NULL && strncmp(path, "/echo/", 6) == 0) {
-        response = handle_echo(path + 6, headers, header_count, client_fd);
-    } else if (path != NULL && strcmp(path, "/user-agent") == 0) {
-        response = handle_user_agent(headers, header_count, client_fd);
-    } else if (path != NULL && strcmp(path, "/") == 0) {
-        response = handle_root();
-    } else {
-        response = handle_not_found();
-    }
 
-    // Send the response (if handler didn't send it directly)
-    if (response != NULL) {
-        send(client_fd, response, strlen(response), 0);
+        // Check if we should close the connection (HTTP/1.1 persistent by default)
+        const char *connection = get_header_value(headers, header_count, "Connection");
+        if (connection != NULL && strcasecmp(connection, "close") == 0) {
+            printf("Client requested connection close\n");
+            break;
+        }
+
+        // Continue to next request on the same connection
+        printf("Keeping connection alive for next request\n");
     }
 
     // Close the client connection
