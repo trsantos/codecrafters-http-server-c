@@ -32,9 +32,38 @@ const char *get_header_value(struct http_header *headers, int count, const char 
 // Helper function to check if client accepts gzip compression
 int client_accepts_gzip(struct http_header *headers, int header_count) {
     const char *accept_encoding = get_header_value(headers, header_count, "Accept-Encoding");
-    if (accept_encoding != NULL && strstr(accept_encoding, "gzip") != NULL) {
-        return 1;
+    if (accept_encoding == NULL) {
+        return 0;
     }
+
+    // Make a copy since strtok modifies the string
+    char buffer[256];
+    strncpy(buffer, accept_encoding, sizeof(buffer) - 1);
+    buffer[sizeof(buffer) - 1] = '\0';
+
+    // Tokenize by comma
+    char *token = strtok(buffer, ",");
+    while (token != NULL) {
+        // Trim leading whitespace
+        while (*token == ' ' || *token == '\t') {
+            token++;
+        }
+
+        // Trim trailing whitespace
+        char *end = token + strlen(token) - 1;
+        while (end > token && (*end == ' ' || *end == '\t')) {
+            *end = '\0';
+            end--;
+        }
+
+        // Exact match
+        if (strcmp(token, "gzip") == 0) {
+            return 1;
+        }
+
+        token = strtok(NULL, ",");
+    }
+
     return 0;
 }
 
