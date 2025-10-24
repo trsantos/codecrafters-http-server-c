@@ -30,6 +30,12 @@ const char *get_header_value(struct http_header *headers, int count, const char 
     return NULL;
 }
 
+// Helper function to get "Connection: close\r\n" header if client requested connection closure
+const char *connection_close_header(struct http_header *headers, int count) {
+    const char *conn = get_header_value(headers, count, "Connection");
+    return (conn != NULL && strcasecmp(conn, "close") == 0) ? "Connection: close\r\n" : "";
+}
+
 // Helper function to check if client accepts gzip compression
 int client_accepts_gzip(struct http_header *headers, int header_count) {
     const char *accept_encoding = get_header_value(headers, header_count, "Accept-Encoding");
@@ -137,8 +143,9 @@ const char *send_text_response(int client_fd, const char *content_type, const ch
                  "Content-Type: %s\r\n"
                  "Content-Encoding: gzip\r\n"
                  "Content-Length: %lu\r\n"
+                 "%s"
                  "\r\n",
-                 content_type, compressed_len);
+                 content_type, compressed_len, connection_close_header(headers, header_count));
         send(client_fd, header_buffer, strlen(header_buffer), 0);
 
         // Send compressed body
@@ -152,8 +159,9 @@ const char *send_text_response(int client_fd, const char *content_type, const ch
                  "HTTP/1.1 200 OK\r\n"
                  "Content-Type: %s\r\n"
                  "Content-Length: %zu\r\n"
+                 "%s"
                  "\r\n",
-                 content_type, body_len);
+                 content_type, body_len, connection_close_header(headers, header_count));
         send(client_fd, header_buffer, strlen(header_buffer), 0);
         send(client_fd, body, body_len, 0);
 
@@ -185,23 +193,41 @@ const char *handle_user_agent(struct http_header *headers, int count, int client
 }
 
 // Handler for /
-const char *handle_root() {
+const char *handle_root(struct http_header *headers, int header_count, int client_fd) {
     printf("Responding with 200 OK\n");
-    return "HTTP/1.1 200 OK\r\n\r\n";
+
+    char response[256];
+    snprintf(response, sizeof(response),
+             "HTTP/1.1 200 OK\r\n"
+             "%s"
+             "\r\n",
+             connection_close_header(headers, header_count));
+    send(client_fd, response, strlen(response), 0);
+
+    return NULL; // Signal that we handled sending directly
 }
 
 // Handler for 404 Not Found
-const char *handle_not_found() {
+const char *handle_not_found(struct http_header *headers, int header_count, int client_fd) {
     printf("Responding with 404 Not Found\n");
-    return "HTTP/1.1 404 Not Found\r\n\r\n";
+
+    char response[256];
+    snprintf(response, sizeof(response),
+             "HTTP/1.1 404 Not Found\r\n"
+             "%s"
+             "\r\n",
+             connection_close_header(headers, header_count));
+    send(client_fd, response, strlen(response), 0);
+
+    return NULL; // Signal that we handled sending directly
 }
 
 // Handler for GET /files/{filename} - returns NULL if handled directly
-const char *handle_files_get(const char *filename, int client_fd) {
+const char *handle_files_get(const char *filename, struct http_header *headers, int header_count, int client_fd) {
     // Check if directory is configured
     if (g_files_directory == NULL) {
         printf("No files directory configured\n");
-        return handle_not_found();
+        return handle_not_found(headers, header_count, client_fd);
     }
 
     // Build full file path
@@ -212,7 +238,7 @@ const char *handle_files_get(const char *filename, int client_fd) {
     FILE *file = fopen(filepath, "rb");
     if (file == NULL) {
         printf("File not found: %s\n", filepath);
-        return handle_not_found();
+        return handle_not_found(headers, header_count, client_fd);
     }
 
     // Get file size
@@ -226,8 +252,9 @@ const char *handle_files_get(const char *filename, int client_fd) {
              "HTTP/1.1 200 OK\r\n"
              "Content-Type: application/octet-stream\r\n"
              "Content-Length: %ld\r\n"
+             "%s"
              "\r\n",
-             file_size);
+             file_size, connection_close_header(headers, header_count));
     send(client_fd, header, strlen(header), 0);
 
     // Send file contents in chunks
@@ -244,11 +271,12 @@ const char *handle_files_get(const char *filename, int client_fd) {
 }
 
 // Handler for POST /files/{filename} - returns NULL if handled directly
-const char *handle_files_post(const char *filename, const char *body, size_t body_len, int client_fd) {
+const char *handle_files_post(const char *filename, const char *body, size_t body_len, struct http_header *headers,
+                              int header_count, int client_fd) {
     // Check if directory is configured
     if (g_files_directory == NULL) {
         printf("No files directory configured\n");
-        return handle_not_found();
+        return handle_not_found(headers, header_count, client_fd);
     }
 
     // Build full file path
@@ -259,7 +287,7 @@ const char *handle_files_post(const char *filename, const char *body, size_t bod
     FILE *file = fopen(filepath, "wb");
     if (file == NULL) {
         printf("Failed to create file: %s (%s)\n", filepath, strerror(errno));
-        return handle_not_found();
+        return handle_not_found(headers, header_count, client_fd);
     }
 
     // Write body to file
@@ -268,13 +296,26 @@ const char *handle_files_post(const char *filename, const char *body, size_t bod
 
     if (bytes_written != body_len) {
         printf("Failed to write complete body to file (wrote %zu of %zu bytes)\n", bytes_written, body_len);
-        return "HTTP/1.1 500 Internal Server Error\r\n\r\n";
+
+        char error_response[256];
+        snprintf(error_response, sizeof(error_response),
+                 "HTTP/1.1 500 Internal Server Error\r\n"
+                 "%s"
+                 "\r\n",
+                 connection_close_header(headers, header_count));
+        send(client_fd, error_response, strlen(error_response), 0);
+        return NULL;
     }
 
     printf("Created file: %s (%zu bytes)\n", filename, body_len);
 
     // Send 201 Created response
-    const char *response = "HTTP/1.1 201 Created\r\n\r\n";
+    char response[256];
+    snprintf(response, sizeof(response),
+             "HTTP/1.1 201 Created\r\n"
+             "%s"
+             "\r\n",
+             connection_close_header(headers, header_count));
     send(client_fd, response, strlen(response), 0);
 
     return NULL; // Signal that we handled sending directly
@@ -384,20 +425,20 @@ void handle_client(int client_fd) {
         if (path != NULL && strncmp(path, "/files/", 7) == 0) {
             // Route based on HTTP method
             if (method != NULL && strcmp(method, "POST") == 0) {
-                response = handle_files_post(path + 7, body, body_len, client_fd);
+                response = handle_files_post(path + 7, body, body_len, headers, header_count, client_fd);
             } else if (method != NULL && strcmp(method, "GET") == 0) {
-                response = handle_files_get(path + 7, client_fd);
+                response = handle_files_get(path + 7, headers, header_count, client_fd);
             } else {
-                response = handle_not_found();
+                response = handle_not_found(headers, header_count, client_fd);
             }
         } else if (path != NULL && strncmp(path, "/echo/", 6) == 0) {
             response = handle_echo(path + 6, headers, header_count, client_fd);
         } else if (path != NULL && strcmp(path, "/user-agent") == 0) {
             response = handle_user_agent(headers, header_count, client_fd);
         } else if (path != NULL && strcmp(path, "/") == 0) {
-            response = handle_root();
+            response = handle_root(headers, header_count, client_fd);
         } else {
-            response = handle_not_found();
+            response = handle_not_found(headers, header_count, client_fd);
         }
 
         // Send the response (if handler didn't send it directly)
